@@ -1,4 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Bdir.Convert.Core\Bdir.Convert.Core.csproj" />
     <ProjectReference Include="..\Bdir.Convert.Html\Bdir.Convert.Html.csproj" />

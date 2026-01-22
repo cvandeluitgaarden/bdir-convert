@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Bdir.Convert.Core.Extraction;
+using Bdir.Convert.Core.Wire;
 using Bdir.Convert.Html;
 
 internal class Program
@@ -16,6 +17,7 @@ internal class Program
 
         return command switch
         {
+            "convert-html" => ConvertHtml(args.Skip(1).ToArray()),
             "regen-goldens" => RegenGoldens([.. args.Skip(1)]),
             _ => Fail($"Unknown command: {command}")
         };
@@ -62,6 +64,103 @@ internal class Program
         return 0;
     }
 
+    static int ConvertHtml(string[] args)
+    {
+        if (args.Length == 0)
+            return Fail("Usage: bdir-convert convert-html <input.html> [options]");
+
+        string? inputPath = null;
+        string? outputPath = null;
+        string? anchorHtmlOut = null;
+
+        // Defaults must be explicit
+        var options = new BlockExtractionOptions(
+            HashAlgorithm: "sha256",
+            NormalizeUnicodeNfc: true,
+            IncludeBoilerplate: false,
+            SplitListItems: true,
+            SplitTableRows: false
+        );
+
+        for (int i = 0; i < args.Length; i++)
+        {
+            var arg = args[i];
+
+            switch (arg)
+            {
+                case "-o":
+                case "--out":
+                    outputPath = args[++i];
+                    break;
+
+                case "--anchor-html-out":
+                    anchorHtmlOut = args[++i];
+                    break;
+
+                case "--split-table-rows":
+                    options = options with { SplitTableRows = true };
+                    break;
+
+                case "--no-split-table-rows":
+                    options = options with { SplitTableRows = false };
+                    break;
+
+                case "--include-boilerplate":
+                    options = options with { IncludeBoilerplate = true };
+                    break;
+
+                case "--exclude-boilerplate":
+                    options = options with { IncludeBoilerplate = false };
+                    break;
+
+                default:
+                    if (arg.StartsWith('-'))
+                        return Fail($"Unknown option: {arg}");
+
+                    inputPath ??= arg;
+                    break;
+            }
+        }
+
+        if (inputPath is null)
+            return Fail("Missing input.html");
+
+        if (!File.Exists(inputPath))
+            return Fail($"Input file not found: {inputPath}");
+
+        var html = File.ReadAllText(inputPath);
+
+        var extractor = new HtmlBlockExtractor();
+        var doc = extractor.Extract(html, options);
+
+        if (doc.Blocks.Count == 0)
+            return Fail("No blocks extracted (refusing to emit empty BDIR)");
+
+        // RFC-ish wire output
+        var wire = WireEditPacketV1.From(doc);
+        var json = WireJson.SerializeCanonical(wire);
+
+        if (outputPath is null)
+        {
+            Console.Out.WriteLine(json);
+        }
+        else
+        {
+            File.WriteAllText(outputPath, json);
+        }
+
+        // Anchors (future)
+        if (anchorHtmlOut is not null)
+        {
+            // TODO: HtmlAnchorStrategy
+            // For now, make this explicit
+            return Fail("--anchor-html-out is not implemented yet");
+        }
+
+        return 0;
+    }
+
+
     static BlockExtractionOptions LoadOptions(string path)
     {
         var json = File.ReadAllText(path);
@@ -98,26 +197,35 @@ internal class Program
         return 1;
     }
 
-    static void PrintHelp()
+    static int PrintHelp()
     {
         Console.WriteLine("""
 bdir-convert
 
 Commands:
-  regen-goldens <fixturesDir>   Regenerate expected.bdir.json for all fixtures in <fixturesDir>
+  convert-html <input.html> [options]
+  regen-goldens <fixturesDir>
+
+convert-html options:
+  -o, --out <file>               Write output to file (default: stdout)
+  --split-table-rows             Emit one block per <tr>
+  --no-split-table-rows          Emit whole table as one block
+  --include-boilerplate          Include nav/header/footer content
+  --exclude-boilerplate          Exclude boilerplate (default)
 
 Example:
-  dotnet run --project src/Bdir.Convert.Cli -- regen-goldens tests/Bdir.Convert.Html.Tests/Fixtures
+  bdir-convert convert-html input.html -o output.bdir.json
 """);
+        return 0;
     }
-}
 
 
-sealed class OptionsDto
-{
-    public string? HashAlgorithm { get; set; }
-    public bool? NormalizeUnicodeNfc { get; set; }
-    public bool? IncludeBoilerplate { get; set; }
-    public bool? SplitListItems { get; set; }
-    public bool? SplitTableRows { get; set; }
+    sealed class OptionsDto
+    {
+        public string? HashAlgorithm { get; set; }
+        public bool? NormalizeUnicodeNfc { get; set; }
+        public bool? IncludeBoilerplate { get; set; }
+        public bool? SplitListItems { get; set; }
+        public bool? SplitTableRows { get; set; }
+    }
 }
