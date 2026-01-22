@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Bdir.Convert.Cli/Bdir.Convert.Cli.csproj" />
+    <Project Path="src/Bdir.Convert.Core/Bdir.Convert.Core.csproj" />
+    <Project Path="src/Bdir.Convert.Html/Bdir.Convert.Html.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Bdir.Convert.Html.Tests/Bdir.Convert.Html.Tests.csproj" />
+  </Folder>
+</Solution>
