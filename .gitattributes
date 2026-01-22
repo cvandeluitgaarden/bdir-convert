@@ -1,0 +1,9 @@
+# Normalize line endings
+* text=auto eol=lf
+
+# Treat JSON as text for better diffs
+*.json text diff
+
+# Optional: make golden JSON diffs extra readable (if you use linguist)
+tests/**/Fixtures/**/expected*.json linguist-language=JSON
+tests/**/Fixtures/**/expected*.json linguist-generated=false

@@ -1,68 +1,167 @@
 # bdir-convert
 
-Converters between common document formats (HTML, Markdown, plain text, …) and **BDIR**.
+**bdir-convert** is a deterministic document conversion toolkit for producing
+**BDIR (Block-based Document Intermediate Representation)** from source formats
+such as HTML.
 
-This repository focuses on:
-- Converting source documents into BDIR + an anchored copy of the source
-- Creating a BDIR EditPacket from the conversion output
-- Applying validated BDIR patches back onto the anchored copy
-- Removing anchors and emitting the final document in the original format
+This repository focuses on **correctness, determinism, and auditability** rather
+than convenience rewriting. It is designed to support AI-assisted review
+workflows where all proposed changes are explicit, reviewable, and safely
+applicable.
+
+---
 
 ## Goals
 
-- **Deterministic** conversion and patch application
-- **Round-trip fidelity**: patch the *original* document (via anchors), not a regenerated one
-- **Format-agnostic core** with format-specific converters
-- **Safety-first**: validate inputs, stable error messages, predictable behavior
+- Deterministic conversion from source documents to BDIR
+- Stable block identifiers and hashes
+- RFC-aligned wire output (Edit Packet format)
+- Human- and machine-reviewable diffs
+- Safe regeneration of expected outputs via golden fixtures
 
-## Pipeline
+Non-goals:
 
-### Convert to BDIR
+- WYSIWYG editing
+- Browser-like rendering
+- JavaScript execution
+- Implicit or heuristic rewriting
 
-Input: `document.<ext>`
+---
 
-Output:
-- `document.anchored.<ext>` (copy of original with BDIR anchors injected)
-- `document.editpacket.json` (BDIR EditPacket derived from the anchored document)
-- (optional) `document.anchors.json` (sidecar map for debugging and tooling)
+## Project structure
 
-Steps:
-1. Read source document
-2. Create an anchored copy by injecting begin/end anchors around extracted blocks
-3. Extract blocks (canonical text) and build a BDIR EditPacket
+```
+bdir-convert/
+├─ src/
+│  ├─ Bdir.Convert.Core/        # Core models, extraction contracts, wire helpers
+│  ├─ Bdir.Convert.Html/        # HTML → BDIR extractor (AngleSharp)
+│  └─ Bdir.Convert.Cli/         # Command-line interface
+│
+├─ tests/
+│  └─ Bdir.Convert.Html.Tests/
+│     ├─ Fixtures/             # Golden test inputs + expected outputs
+│     └─ TestSupport/           # JSON asserts, helpers
+│
+├─ docs/
+│  ├─ ANCHORS.md
+│  └─ ROADMAP.md
+│
+├─ scripts/
+│  └─ test.sh                  # Test wrapper (excludes regen by default)
+│
+└─ bdir-convert.sln
+```
 
-### Convert back to original
+---
 
-Input:
-- `document.anchored.<ext>`
-- `document.patched.bdir.json` (or `editpacket.json` + `patch.json`)
+## Conversion model (high level)
 
-Output:
-- `document.<ext>` (final, anchors removed)
+1. Parse source document (e.g. HTML) using a deterministic parser
+2. Extract semantic blocks in document order
+3. Canonicalize text (Unicode NFC, whitespace rules)
+4. Assign stable block identifiers
+5. Compute block-level and page-level hashes
+6. Emit BDIR and RFC-style Edit Packet wire output
 
-Steps:
-1. Apply patch to the BDIR blocks (BDIR-level logic)
-2. Materialize the block changes into the anchored copy by replacing content within anchors
-3. Remove anchors
-4. Emit updated document in the original format
+No network access, no clocks, no randomness.
 
-## Repository layout (proposed)
+---
 
-- `src/`
-  - `Bdir.Convert.Core/` — shared types + canonicalization + validation helpers
-  - `Bdir.Convert.Cli/` — CLI entrypoint
-  - `Bdir.Convert.Html/` — HTML converter (anchors + extraction + apply-back)
-  - `Bdir.Convert.Markdown/` — Markdown converter
-- `tests/`
-  - `Bdir.Convert.Tests/` — golden tests + interoperability tests
-- `docs/`
-  - design notes, format specs, anchor conventions
+## RFC-style wire output
 
-## Development
+Golden fixtures and CLI output use an RFC-aligned **Edit Packet** shape:
 
-### Prerequisites
-- .NET SDK (recommended: latest LTS)
+```json
+{
+  "v": 1,
+  "h": "page_hash",
+  "ha": "sha256",
+  "b": [
+    ["block_id", kind_code, "text_hash", "text"]
+  ]
+}
+```
 
-### Build
+- `v`  : protocol version
+- `h`  : page-level content hash
+- `ha` : hash algorithm
+- `b`  : ordered block tuples
+
+This mirrors the BDIR Patch Protocol wire format and enables
+safe downstream validation and patching.
+
+---
+
+## Testing strategy
+
+This repository uses **golden fixtures** to enforce determinism.
+
+### Test categories
+
+- **GoldenDeterminismTests**
+  - Compare extractor output against committed golden files
+  - Run in CI
+  - Never write files
+
+- **GoldenRegenTests**
+  - Regenerate `expected.bdir.json` files
+  - Run manually only
+  - Explicitly excluded from CI
+
+### Running tests
+
 ```bash
-dotnet build
+# Normal tests (CI-safe)
+./scripts/test.sh
+
+# Regenerate golden fixtures
+./scripts/test.sh --regen
+```
+
+CI enforces `Category!=Regen` by default.
+
+---
+
+## CLI usage
+
+Regenerate golden fixtures explicitly:
+
+```bash
+dotnet run --project src/Bdir.Convert.Cli --   regen-goldens tests/Bdir.Convert.Html.Tests/Fixtures
+```
+
+The CLI always writes expected outputs into the project directory,
+never into build output folders.
+
+---
+
+## Determinism guarantees
+
+The following are treated as invariants:
+
+- Same input + same options ⇒ identical output
+- Stable block ordering
+- Stable block identifiers
+- Hash truncation ≥ 8 hex characters
+- No hidden defaults or environment-dependent behavior
+
+Any change that affects output **must** update golden fixtures and be reviewed.
+
+---
+
+## License
+
+This project is licensed under the **MIT License**.
+See [LICENSE](LICENSE) for details.
+
+---
+
+## Status
+
+This project is under active development.
+The public APIs should be considered **unstable** until a 1.0 release.
+
+Feedback and contributions are welcome, especially around:
+- additional converters
+- edge-case fixtures
+- RFC alignment

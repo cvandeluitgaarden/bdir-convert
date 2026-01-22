@@ -1,0 +1,29 @@
+<Project>
+  <PropertyGroup>
+    <!-- Target framework -->
+    <TargetFramework>net10.0</TargetFramework>
+
+    <!-- Language & safety -->
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <!-- Build consistency -->
+    <LangVersion>latest</LangVersion>
+    <Deterministic>true</Deterministic>
+
+    <!-- CI friendliness -->
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+    <Target Name="FailIfRegenTestsRunInCI" BeforeTargets="VSTest">
+    <!-- Only enforce in CI -->
+    <Error
+      Condition="'$(CI)' == 'true' and '$(VSTestTestCaseFilter)' != '' and $(VSTestTestCaseFilter.Contains('Category=Regen'))"
+      Text="CI must not run Regen tests. Remove 'Category=Regen' from test filter." />
+
+    <Error
+      Condition="'$(CI)' == 'true' and '$(VSTestTestCaseFilter)' == ''"
+      Text="CI must run tests with a filter excluding Regen tests, e.g. --filter &quot;Category!=Regen&quot;." />
+  </Target>
+</Project>
