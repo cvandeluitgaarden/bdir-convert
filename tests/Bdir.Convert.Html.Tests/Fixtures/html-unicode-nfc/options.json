@@ -1,0 +1,7 @@
+{
+  "hashAlgorithm": "sha256",
+  "normalizeUnicodeNfc": true,
+  "includeBoilerplate": false,
+  "splitListItems": true,
+  "splitTableRows": false
+}

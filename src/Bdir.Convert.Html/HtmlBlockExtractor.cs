@@ -425,14 +425,54 @@ public sealed partial class HtmlBlockExtractor : IBlockExtractor
 
     private static string ComputeStableBlockId(IElement el, string canonicalText, string context)
     {
-        // Recommended strategy C (content-fingerprint with locality):
-        // id = <tag>_<sha256(ctx + "\n" + tag + "\n" + textPrefix)[0..12]>
+        // Structural strategy (position-based):
+        // id = <tag>_<sha256(domPath)[0..12]>
+        //
+        // Rationale:
+        // - block_id MUST be stable and unique even when canonicalText is identical across blocks
+        // - content identity is captured separately by text_hash
         var tag = el.TagName.ToLowerInvariant();
-        var prefix = canonicalText.Length <= 64 ? canonicalText : canonicalText[..64];
+        var domPath = ComputeDomPath(el);
 
-        var material = $"{context}\n{tag}\n{prefix}";
-        var fp = Sha256Hex(Encoding.UTF8.GetBytes(material));
+        var fp = Sha256Hex(Encoding.UTF8.GetBytes(domPath));
         return $"{tag}_{fp[..12]}";
+    }
+
+    private static string ComputeDomPath(IElement el)
+    {
+        // XPath-like path using 1-based indices among siblings with the same tag name:
+        // /html[1]/body[1]/main[1]/p[3]
+        var segments = new List<string>();
+
+        IElement? cur = el;
+        while (cur is not null)
+        {
+            var tag = cur.TagName.ToLowerInvariant();
+            var index = 1;
+
+            var parent = cur.ParentElement;
+            if (parent is not null)
+            {
+                index = 0;
+                foreach (var sibling in parent.Children)
+                {
+                    if (!string.Equals(sibling.TagName, cur.TagName, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    index++;
+                    if (ReferenceEquals(sibling, cur))
+                        break;
+                }
+
+                if (index == 0) index = 1; // fallback (shouldn't happen)
+            }
+
+            segments.Add($"{tag}[{index}]");
+            cur = parent;
+        }
+
+        segments.Reverse();
+        return "/" + string.Join("/", segments);
     }
 
     private static void EnsureUniqueBlockIds(List<BdirBlock> blocks)
