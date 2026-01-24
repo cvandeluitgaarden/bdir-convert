@@ -5,6 +5,7 @@ using Bdir.Convert.Html;
 using Bdir.Convert.Core.Wire;
 using Bdir.Convert.Html.Tests.TestSupport;
 
+[Collection("Golden")]
 public sealed class GoldenDeterminismTests
 {
     [Fact]

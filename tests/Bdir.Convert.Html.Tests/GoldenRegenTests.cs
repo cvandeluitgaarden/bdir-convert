@@ -1,14 +1,24 @@
 using Bdir.Convert.Core.Wire;
 using Bdir.Convert.Html.Tests.TestSupport;
+using Xunit.Abstractions;
+using Xunit.Sdk;
 
 namespace Bdir.Convert.Html.Tests;
 
-public sealed class GoldenRegenTests
+[Collection("Golden")]
+public sealed class GoldenRegenTests(ITestOutputHelper _output)
 {
     [Fact]
     [Trait("Category", "Regen")]
     public void Regenerate_all_golden_wire_fixtures()
     {
+        var allow = string.Equals(Environment.GetEnvironmentVariable("BDIR_GOLDEN_REGEN"), "1",  StringComparison.OrdinalIgnoreCase);
+        if(!allow)
+        {
+            _output.WriteLine("Set BDIR_GOLDEN_REGEN=1 to regenerate golden fixtures");
+            return;
+        }
+        
         var projectRoot = GoldenTestHelpers.FindProjectDirectory("Bdir.Convert.Html.Tests.csproj");
         var fixtureRoot = Path.Combine(projectRoot, "Fixtures");
 
