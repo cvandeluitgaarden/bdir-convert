@@ -71,6 +71,7 @@ internal class Program
 
         string? inputPath = null;
         string? outputPath = null;
+        string? editPacketOutPath = null;
         string? anchorHtmlOut = null;
 
         // Defaults must be explicit
@@ -91,6 +92,10 @@ internal class Program
                 case "-o":
                 case "--out":
                     outputPath = args[++i];
+                    break;
+
+                case "--edit-packet-out":
+                    editPacketOutPath = args[++i];
                     break;
 
                 case "--anchor-html-out":
@@ -149,19 +154,19 @@ internal class Program
             File.WriteAllText(outputPath, json);
         }
 
-        // Anchored HTML (optional, additive)
+        // Optional minified Edit Packet output (AI payload)
+        if (editPacketOutPath is not null)
+        {
+            var min = WireJson.SerializeMinified(wire);
+            File.WriteAllText(editPacketOutPath, min);
+        }
+
+        // Optional anchored HTML output.
+        // Can be combined with --out / --edit-packet-out to emit multiple artifacts in a single run.
         if (anchorHtmlOut is not null)
         {
-            var anchorer = new HtmlAnchorStrategy();
-            var anchored = anchorer.Anchor(html, doc.Blocks);
-
-            // Ensure directory exists
-            var fullPath = Path.GetFullPath(anchorHtmlOut);
-            var dir = Path.GetDirectoryName(fullPath);
-            if (!string.IsNullOrEmpty(dir))
-                Directory.CreateDirectory(dir);
-
-            File.WriteAllText(fullPath, anchored.Content);
+            var anchored = extractor.AnchorHtml(html, options, doc.Blocks);
+            File.WriteAllText(anchorHtmlOut, anchored);
         }
 
         return 0;
@@ -215,15 +220,17 @@ Commands:
 
 convert-html options:
   -o, --out <file>               Write output to file (default: stdout)
+  --edit-packet-out <file>       Write a minified Edit Packet JSON (AI payload)
+  --anchor-html-out <file>       Write HTML with deterministic BDIR anchors injected
   --split-table-rows             Emit one block per <tr>
   --no-split-table-rows          Emit whole table as one block
   --include-boilerplate          Include nav/header/footer content
   --exclude-boilerplate          Exclude boilerplate (default)
-  --anchor-html-out <file>       Write a copy of the input HTML with deterministic BDIR anchors injected
 
 Example:
   bdir-convert convert-html input.html -o output.bdir.json
-  bdir-convert convert-html input.html -o output.bdir.json --anchor-html-out anchored.html
+  bdir-convert convert-html input.html --edit-packet-out edit-packet.min.json
+  bdir-convert convert-html input.html -o output.bdir.json --edit-packet-out edit-packet.min.json --anchor-html-out anchored.html
 """);
         return 0;
     }
