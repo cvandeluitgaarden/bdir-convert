@@ -149,12 +149,19 @@ internal class Program
             File.WriteAllText(outputPath, json);
         }
 
-        // Anchors (future)
+        // Anchored HTML (optional, additive)
         if (anchorHtmlOut is not null)
         {
-            // TODO: HtmlAnchorStrategy
-            // For now, make this explicit
-            return Fail("--anchor-html-out is not implemented yet");
+            var anchorer = new HtmlAnchorStrategy();
+            var anchored = anchorer.Anchor(html, doc.Blocks);
+
+            // Ensure directory exists
+            var fullPath = Path.GetFullPath(anchorHtmlOut);
+            var dir = Path.GetDirectoryName(fullPath);
+            if (!string.IsNullOrEmpty(dir))
+                Directory.CreateDirectory(dir);
+
+            File.WriteAllText(fullPath, anchored.Content);
         }
 
         return 0;
@@ -212,9 +219,11 @@ convert-html options:
   --no-split-table-rows          Emit whole table as one block
   --include-boilerplate          Include nav/header/footer content
   --exclude-boilerplate          Exclude boilerplate (default)
+  --anchor-html-out <file>       Write a copy of the input HTML with deterministic BDIR anchors injected
 
 Example:
   bdir-convert convert-html input.html -o output.bdir.json
+  bdir-convert convert-html input.html -o output.bdir.json --anchor-html-out anchored.html
 """);
         return 0;
     }
