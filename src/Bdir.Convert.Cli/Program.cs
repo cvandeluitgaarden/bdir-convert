@@ -1,5 +1,7 @@
 using System.Text.Json;
 using Bdir.Convert.Core.Extraction;
+using Bdir.Convert.Core.Models;
+using Bdir.Convert.Core.Patching;
 using Bdir.Convert.Core.Wire;
 using Bdir.Convert.Html;
 
@@ -18,6 +20,7 @@ internal class Program
         return command switch
         {
             "convert-html" => ConvertHtml(args.Skip(1).ToArray()),
+            "apply-patch-html" => ApplyPatchHtml(args.Skip(1).ToArray()),
             "regen-goldens" => RegenGoldens([.. args.Skip(1)]),
             _ => Fail($"Unknown command: {command}")
         };
@@ -172,6 +175,155 @@ internal class Program
         return 0;
     }
 
+    static int ApplyPatchHtml(string[] args)
+    {
+        if (args.Length < 2)
+            return Fail("Usage: bdir-convert apply-patch-html <input.html> <patch.json> [options]");
+
+        var inputPath = args[0];
+        var patchPath = args[1];
+
+        string? outputPath = null;
+        string? editPacketOutPath = null;
+        string? exportHtmlOutPath = null;
+        string? anchoredHtmlOutPath = null;
+
+        // Defaults must match convert-html.
+        var options = new BlockExtractionOptions(
+            HashAlgorithm: "sha256",
+            NormalizeUnicodeNfc: true,
+            IncludeBoilerplate: false,
+            SplitListItems: true,
+            SplitTableRows: false
+        );
+
+        // Parse options after positional args.
+        for (int i = 2; i < args.Length; i++)
+        {
+            var arg = args[i];
+            switch (arg)
+            {
+                case "-o":
+                case "--out":
+                    outputPath = args[++i];
+                    break;
+
+                case "--edit-packet-out":
+                    editPacketOutPath = args[++i];
+                    break;
+
+                case "--export-html-out":
+                    exportHtmlOutPath = args[++i];
+                    break;
+
+                case "--anchor-html-out":
+                    anchoredHtmlOutPath = args[++i];
+                    break;
+
+                case "--split-table-rows":
+                    options = options with { SplitTableRows = true };
+                    break;
+
+                case "--no-split-table-rows":
+                    options = options with { SplitTableRows = false };
+                    break;
+
+                case "--include-boilerplate":
+                    options = options with { IncludeBoilerplate = true };
+                    break;
+
+                case "--exclude-boilerplate":
+                    options = options with { IncludeBoilerplate = false };
+                    break;
+
+                default:
+                    if (arg.StartsWith('-'))
+                        return Fail($"Unknown option: {arg}");
+                    return Fail($"Unexpected argument: {arg}");
+            }
+        }
+
+        if (!File.Exists(inputPath))
+            return Fail($"Input file not found: {inputPath}");
+        if (!File.Exists(patchPath))
+            return Fail($"Patch file not found: {patchPath}");
+
+        var html = File.ReadAllText(inputPath);
+        var patchJson = File.ReadAllText(patchPath);
+
+        WirePatchV1 patch;
+        try
+        {
+            patch = JsonSerializer.Deserialize<WirePatchV1>(patchJson)
+                    ?? throw new InvalidOperationException("Invalid patch JSON");
+        }
+        catch (Exception ex)
+        {
+            return Fail($"Failed to parse patch.json: {ex.Message}");
+        }
+
+        var extractor = new HtmlBlockExtractor();
+        var originalDoc = extractor.Extract(html, options);
+
+        BdirDocument patchedDoc;
+        try
+        {
+            patchedDoc = PatchApplier.Apply(originalDoc, patch, options.NormalizeUnicodeNfc);
+        }
+        catch (Exception ex)
+        {
+            return Fail($"Patch application failed: {ex.Message}");
+        }
+
+        // Emit updated Edit Packet (wire form)
+        var wire = WireEditPacketV1.From(patchedDoc);
+        var pretty = WireJson.SerializeCanonical(wire);
+
+        if (outputPath is null)
+            Console.Out.WriteLine(pretty);
+        else
+            File.WriteAllText(outputPath, pretty);
+
+        if (editPacketOutPath is not null)
+        {
+            var min = WireJson.SerializeMinified(wire);
+            File.WriteAllText(editPacketOutPath, min);
+        }
+
+        // Emit HTML outputs (optional)
+        if (anchoredHtmlOutPath is not null || exportHtmlOutPath is not null)
+        {
+            // If export is requested, write stripped HTML. If anchor is requested, keep anchors.
+            var wantStrip = exportHtmlOutPath is not null;
+            var patchedHtml = HtmlPatchRenderer.ApplyPatchedBlocks(
+                originalHtml: html,
+                options: options,
+                extractor: extractor,
+                originalBlocks: originalDoc.Blocks,
+                patchedBlocks: patchedDoc.Blocks,
+                stripAnchors: wantStrip
+            );
+
+            if (anchoredHtmlOutPath is not null)
+            {
+                // Ensure anchored output contains anchors even if export is also requested.
+                var anchoredPatched = HtmlPatchRenderer.ApplyPatchedBlocks(
+                    originalHtml: html,
+                    options: options,
+                    extractor: extractor,
+                    originalBlocks: originalDoc.Blocks,
+                    patchedBlocks: patchedDoc.Blocks,
+                    stripAnchors: false
+                );
+                File.WriteAllText(anchoredHtmlOutPath, anchoredPatched);
+            }
+
+            if (exportHtmlOutPath is not null)
+                File.WriteAllText(exportHtmlOutPath, patchedHtml);
+        }
+
+        return 0;
+    }
 
     static BlockExtractionOptions LoadOptions(string path)
     {
@@ -216,6 +368,7 @@ bdir-convert
 
 Commands:
   convert-html <input.html> [options]
+  apply-patch-html <input.html> <patch.json> [options]
   regen-goldens <fixturesDir>
 
 convert-html options:
@@ -231,6 +384,15 @@ Example:
   bdir-convert convert-html input.html -o output.bdir.json
   bdir-convert convert-html input.html --edit-packet-out edit-packet.min.json
   bdir-convert convert-html input.html -o output.bdir.json --edit-packet-out edit-packet.min.json --anchor-html-out anchored.html
+
+apply-patch-html options:
+  -o, --out <file>               Write updated Edit Packet JSON (default: stdout)
+  --edit-packet-out <file>       Write a minified updated Edit Packet JSON
+  --export-html-out <file>       Write updated HTML with anchors stripped
+  --anchor-html-out <file>       Write updated HTML with anchors preserved
+
+Example:
+  bdir-convert apply-patch-html input.html patch.json -o updated.bdir.json --export-html-out updated.html
 """);
         return 0;
     }
