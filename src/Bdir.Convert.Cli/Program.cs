@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Collections.Generic;
 using Bdir.Convert.Core.Extraction;
 using Bdir.Convert.Core.Models;
 using Bdir.Convert.Core.Patching;
@@ -76,6 +77,7 @@ internal class Program
         string? outputPath = null;
         string? editPacketOutPath = null;
         string? anchorHtmlOut = null;
+        bool warnOverwriteRisk = true;
 
         // Defaults must be explicit
         var options = new BlockExtractionOptions(
@@ -103,6 +105,10 @@ internal class Program
 
                 case "--anchor-html-out":
                     anchorHtmlOut = args[++i];
+                    break;
+
+                case "--no-warn-overwrite-risk":
+                    warnOverwriteRisk = false;
                     break;
 
                 case "--split-table-rows":
@@ -149,13 +155,9 @@ internal class Program
         var json = WireJson.SerializeCanonical(wire);
 
         if (outputPath is null)
-        {
             Console.Out.WriteLine(json);
-        }
         else
-        {
             File.WriteAllText(outputPath, json);
-        }
 
         // Optional minified Edit Packet output (AI payload)
         if (editPacketOutPath is not null)
@@ -165,11 +167,14 @@ internal class Program
         }
 
         // Optional anchored HTML output.
-        // Can be combined with --out / --edit-packet-out to emit multiple artifacts in a single run.
         if (anchorHtmlOut is not null)
         {
-            var anchored = extractor.AnchorHtml(html, options, doc.Blocks);
+            var warnings = warnOverwriteRisk ? new List<HtmlAnchorWarning>() : null;
+            var anchored = extractor.AnchorHtml(html, options, doc.Blocks, warnings);
             File.WriteAllText(anchorHtmlOut, anchored);
+
+            if (warnOverwriteRisk && warnings is not null)
+                EmitOverwriteWarnings(warnings);
         }
 
         return 0;
@@ -187,6 +192,9 @@ internal class Program
         string? editPacketOutPath = null;
         string? exportHtmlOutPath = null;
         string? anchoredHtmlOutPath = null;
+
+        bool force = false;
+        bool warnOverwriteRisk = true;
 
         // Defaults must match convert-html.
         var options = new BlockExtractionOptions(
@@ -218,6 +226,14 @@ internal class Program
 
                 case "--anchor-html-out":
                     anchoredHtmlOutPath = args[++i];
+                    break;
+
+                case "--force":
+                    force = true;
+                    break;
+
+                case "--no-warn-overwrite-risk":
+                    warnOverwriteRisk = false;
                     break;
 
                 case "--split-table-rows":
@@ -265,6 +281,58 @@ internal class Program
         var extractor = new HtmlBlockExtractor();
         var originalDoc = extractor.Extract(html, options);
 
+        // In suggest-only mode (default), we do not mutate anything.
+        // We still validate patch binding (v/ha/h) and emit useful warnings.
+        if (!force)
+        {
+            try
+            {
+                ValidatePatchBinding(originalDoc, patch);
+            }
+            catch (Exception ex)
+            {
+                return Fail($"Patch validation failed: {ex.Message}");
+            }
+
+            EmitSuggestOnlyDiagnostics(patch);
+
+            // Emit original edit packet (pretty/min) so downstream tools can still operate.
+            var wire = WireEditPacketV1.From(originalDoc);
+            var pretty = WireJson.SerializeCanonical(wire);
+
+            if (outputPath is null)
+                Console.Out.WriteLine(pretty);
+            else
+                File.WriteAllText(outputPath, pretty);
+
+            if (editPacketOutPath is not null)
+            {
+                var min = WireJson.SerializeMinified(wire);
+                File.WriteAllText(editPacketOutPath, min);
+            }
+
+            // Optional HTML outputs are based on the original (unpatched) HTML.
+            if (anchoredHtmlOutPath is not null)
+            {
+                var warnings = warnOverwriteRisk ? new List<HtmlAnchorWarning>() : null;
+                var anchored = extractor.AnchorHtml(html, options, originalDoc.Blocks, warnings);
+                File.WriteAllText(anchoredHtmlOutPath, anchored);
+
+                if (warnOverwriteRisk && warnings is not null)
+                    EmitOverwriteWarnings(warnings);
+            }
+
+            if (exportHtmlOutPath is not null)
+            {
+                // Export without anchors == original HTML; still run through strip to guarantee no anchor attrs.
+                var stripped = extractor.StripAnchors(html);
+                File.WriteAllText(exportHtmlOutPath, stripped);
+            }
+
+            return 0;
+        }
+
+        // Force mode: apply patch back to BDIR and (optionally) HTML.
         BdirDocument patchedDoc;
         try
         {
@@ -276,18 +344,20 @@ internal class Program
         }
 
         // Emit updated Edit Packet (wire form)
-        var wire = WireEditPacketV1.From(patchedDoc);
-        var pretty = WireJson.SerializeCanonical(wire);
-
-        if (outputPath is null)
-            Console.Out.WriteLine(pretty);
-        else
-            File.WriteAllText(outputPath, pretty);
-
-        if (editPacketOutPath is not null)
         {
-            var min = WireJson.SerializeMinified(wire);
-            File.WriteAllText(editPacketOutPath, min);
+            var wire = WireEditPacketV1.From(patchedDoc);
+            var pretty = WireJson.SerializeCanonical(wire);
+
+            if (outputPath is null)
+                Console.Out.WriteLine(pretty);
+            else
+                File.WriteAllText(outputPath, pretty);
+
+            if (editPacketOutPath is not null)
+            {
+                var min = WireJson.SerializeMinified(wire);
+                File.WriteAllText(editPacketOutPath, min);
+            }
         }
 
         // Emit HTML outputs (optional)
@@ -306,7 +376,6 @@ internal class Program
 
             if (anchoredHtmlOutPath is not null)
             {
-                // Ensure anchored output contains anchors even if export is also requested.
                 var anchoredPatched = HtmlPatchRenderer.ApplyPatchedBlocks(
                     originalHtml: html,
                     options: options,
@@ -315,6 +384,15 @@ internal class Program
                     patchedBlocks: patchedDoc.Blocks,
                     stripAnchors: false
                 );
+
+                // Collect overwrite warnings for anchored output if enabled.
+                if (warnOverwriteRisk)
+                {
+                    var warnings = new List<HtmlAnchorWarning>();
+                    _ = extractor.AnchorHtml(anchoredPatched, options, patchedDoc.Blocks, warnings);
+                    EmitOverwriteWarnings(warnings);
+                }
+
                 File.WriteAllText(anchoredHtmlOutPath, anchoredPatched);
             }
 
@@ -323,6 +401,60 @@ internal class Program
         }
 
         return 0;
+    }
+
+    static void ValidatePatchBinding(BdirDocument doc, WirePatchV1 patch)
+    {
+        if (patch.Version != 1)
+            throw new InvalidOperationException($"Unsupported patch version: {patch.Version}");
+
+        var patchHa = string.IsNullOrWhiteSpace(patch.HashAlgorithm) ? "sha256" : patch.HashAlgorithm!;
+        if (!string.Equals(patchHa, doc.HashAlgorithm, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"patch hash algorithm mismatch (patch.ha='{patchHa}', doc.hash_algorithm='{doc.HashAlgorithm}')");
+
+        if (!string.Equals(patch.PageHash, doc.PageHash, StringComparison.Ordinal))
+            throw new InvalidOperationException("patch page hash mismatch");
+    }
+
+    static void EmitSuggestOnlyDiagnostics(WirePatchV1 patch)
+    {
+        // Always tell the operator what's happening.
+        Console.Error.WriteLine("WARN suggest-only: patch will NOT be applied unless --force is provided.");
+
+        foreach (var op in patch.Ops)
+        {
+            switch (op)
+            {
+                case WireSuggestOp s:
+                    Console.Error.WriteLine($"SUGGEST block_id={s.BlockId}: {s.Message}");
+                    break;
+
+                case WireReplaceOp r:
+                    Console.Error.WriteLine($"WARN skipped replace block_id={r.BlockId}: run with --force to apply");
+                    break;
+
+                case WireDeleteOp d:
+                    Console.Error.WriteLine($"WARN skipped delete block_id={d.BlockId}: run with --force to apply");
+                    break;
+
+                case WireInsertAfterOp ins:
+                    Console.Error.WriteLine($"WARN skipped insert_after block_id={ins.BlockId}: run with --force to apply");
+                    break;
+
+                default:
+                    Console.Error.WriteLine($"WARN skipped op type={op.GetType().Name}: run with --force to apply");
+                    break;
+            }
+        }
+    }
+
+    static void EmitOverwriteWarnings(IEnumerable<HtmlAnchorWarning> warnings)
+    {
+        foreach (var w in warnings)
+        {
+            var tags = string.Join(',', w.ChildElementTags.Distinct(StringComparer.Ordinal));
+            Console.Error.WriteLine($"WARN anchor-overwrite-risk block_id={w.BlockId} kind={w.KindCode} tag=<{w.TagName}> children=[{tags}]");
+        }
     }
 
     static BlockExtractionOptions LoadOptions(string path)
@@ -364,39 +496,38 @@ internal class Program
     static int PrintHelp()
     {
         Console.WriteLine("""
-bdir-convert
+ bdir-convert
 
-Commands:
-  convert-html <input.html> [options]
-  apply-patch-html <input.html> <patch.json> [options]
-  regen-goldens <fixturesDir>
+ Commands:
+   convert-html <input.html> [options]
+   apply-patch-html <input.html> <patch.json> [options]
+   regen-goldens <fixturesDir>
 
-convert-html options:
-  -o, --out <file>               Write output to file (default: stdout)
-  --edit-packet-out <file>       Write a minified Edit Packet JSON (AI payload)
-  --anchor-html-out <file>       Write HTML with deterministic BDIR anchors injected
-  --split-table-rows             Emit one block per <tr>
-  --no-split-table-rows          Emit whole table as one block
-  --include-boilerplate          Include nav/header/footer content
-  --exclude-boilerplate          Exclude boilerplate (default)
+ convert-html options:
+   -o, --out <file>               Write output to file (default: stdout)
+   --edit-packet-out <file>       Write a minified Edit Packet JSON (AI payload)
+   --anchor-html-out <file>       Write HTML with deterministic BDIR anchors injected
+   --no-warn-overwrite-risk       Disable warnings for anchors that contain child elements
+   --split-table-rows             Emit one block per <tr>
+   --no-split-table-rows          Emit whole table as one block
+   --include-boilerplate          Include nav/header/footer content
+   --exclude-boilerplate          Exclude boilerplate (default)
 
-Example:
-  bdir-convert convert-html input.html -o output.bdir.json
-  bdir-convert convert-html input.html --edit-packet-out edit-packet.min.json
-  bdir-convert convert-html input.html -o output.bdir.json --edit-packet-out edit-packet.min.json --anchor-html-out anchored.html
+ apply-patch-html options:
+   -o, --out <file>               Write (updated) Edit Packet JSON (default: stdout)
+   --edit-packet-out <file>       Write a minified (updated) Edit Packet JSON
+   --export-html-out <file>       Write updated HTML with anchors stripped
+   --anchor-html-out <file>       Write HTML with anchors preserved
+   --force                        Actually apply the patch (default is suggest-only)
+   --no-warn-overwrite-risk       Disable warnings for anchors that contain child elements
 
-apply-patch-html options:
-  -o, --out <file>               Write updated Edit Packet JSON (default: stdout)
-  --edit-packet-out <file>       Write a minified updated Edit Packet JSON
-  --export-html-out <file>       Write updated HTML with anchors stripped
-  --anchor-html-out <file>       Write updated HTML with anchors preserved
-
-Example:
-  bdir-convert apply-patch-html input.html patch.json -o updated.bdir.json --export-html-out updated.html
-""");
+ Examples:
+   bdir-convert convert-html input.html -o edit-packet.json --edit-packet-out edit-packet.min.json --anchor-html-out anchored.html
+   bdir-convert apply-patch-html input.html patch.json -o out.json   # suggest-only (no mutation)
+   bdir-convert apply-patch-html input.html patch.json --force -o out.json --export-html-out updated.html
+ """);
         return 0;
     }
-
 
     sealed class OptionsDto
     {

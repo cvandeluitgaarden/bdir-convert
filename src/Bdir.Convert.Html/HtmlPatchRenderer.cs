@@ -1,7 +1,8 @@
+using System.Linq;
+using AngleSharp;
 using AngleSharp.Dom;
 using Bdir.Convert.Core.Extraction;
 using Bdir.Convert.Core.Models;
-using System.Linq;
 
 namespace Bdir.Convert.Html;
 
@@ -26,7 +27,8 @@ public static class HtmlPatchRenderer
         var anchored = extractor.AnchorHtml(originalHtml, options, originalBlocks);
 
         // Step 2: Load anchored HTML and update blocks by id.
-        var doc = extractor.Parser.ParseDocument(anchored);
+        var context = BrowsingContext.New(Configuration.Default);
+        var doc = context.OpenAsync(req => req.Content(anchored)).GetAwaiter().GetResult();
         var root = doc.Body ?? doc.DocumentElement;
         if (root is null)
             return anchored;

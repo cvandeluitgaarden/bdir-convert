@@ -53,10 +53,6 @@ public sealed partial class HtmlBlockExtractor : IBlockExtractor
 
     private readonly HtmlParser _parser;
 
-    // Internal escape hatch for helpers that must use the exact same parser instance
-    // (avoids differing default parser configuration).
-    internal HtmlParser Parser => _parser;
-
     public HtmlBlockExtractor()
     {
         // Deterministic parsing: AngleSharp does not execute JS by default.
