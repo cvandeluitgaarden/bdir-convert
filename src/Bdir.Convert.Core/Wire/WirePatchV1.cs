@@ -19,7 +19,7 @@ public sealed class WirePatchV1
     public string? HashAlgorithm { get; init; }
 
     [JsonPropertyName("ops")]
-    public List<WirePatchOp> Ops { get; init; } = [];
+    public List<WirePatchOp> Ops { get; set; } = [];
 }
 
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "op")]

@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Linq;
 using AngleSharp;
 using AngleSharp.Dom;
@@ -15,7 +16,7 @@ public static class HtmlPatchRenderer
     private const string AttrBlockId = "data-bdir-block";
     private const string AttrKindCode = "data-bdir-kind";
 
-    public static string ApplyPatchedBlocks(string originalHtml, BlockExtractionOptions options, HtmlBlockExtractor extractor, IReadOnlyList<BdirBlock> originalBlocks, IReadOnlyList<BdirBlock> patchedBlocks, bool stripAnchors)
+    public static string ApplyPatchedBlocks(string originalHtml, BlockExtractionOptions options, HtmlBlockExtractor extractor, IReadOnlyList<BdirBlock> originalBlocks, IReadOnlyList<BdirBlock> patchedBlocks, bool stripAnchors, IList<HtmlAnchorWarning>? warnings = null)
     {
         ArgumentNullException.ThrowIfNull(originalHtml);
         ArgumentNullException.ThrowIfNull(options);
@@ -24,7 +25,7 @@ public static class HtmlPatchRenderer
         ArgumentNullException.ThrowIfNull(patchedBlocks);
 
         // Step 1: Anchor a copy of the original.
-        var anchored = extractor.AnchorHtml(originalHtml, options, originalBlocks);
+        var anchored = extractor.AnchorHtml(originalHtml, options, originalBlocks, warnings);
 
         // Step 2: Load anchored HTML and update blocks by id.
         var context = BrowsingContext.New(Configuration.Default);

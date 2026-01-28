@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Collections.Generic;
+using System.Text.RegularExpressions;
 using Bdir.Convert.Core.Extraction;
 using Bdir.Convert.Core.Models;
 using Bdir.Convert.Core.Patching;
@@ -54,7 +55,8 @@ internal class Program
             var html = File.ReadAllText(inputPath);
             var options = LoadOptions(optionsPath);
 
-            var doc = extractor.Extract(html, options);
+            var preserved = PreserveScriptAndStyle(html, out _);
+            var doc = extractor.Extract(preserved, options);
             if (doc.Blocks.Count == 0)
                 return Fail($"Fixture '{name}' produced zero blocks; refusing to write expected.bdir.json");
 
@@ -142,10 +144,11 @@ internal class Program
         if (!File.Exists(inputPath))
             return Fail($"Input file not found: {inputPath}");
 
-        var html = File.ReadAllText(inputPath);
+        var originalHtml = File.ReadAllText(inputPath);
+        var preserved = PreserveScriptAndStyle(originalHtml, out var preservedMap);
 
         var extractor = new HtmlBlockExtractor();
-        var doc = extractor.Extract(html, options);
+        var doc = extractor.Extract(preserved, options);
 
         if (doc.Blocks.Count == 0)
             return Fail("No blocks extracted (refusing to emit empty BDIR)");
@@ -170,7 +173,8 @@ internal class Program
         if (anchorHtmlOut is not null)
         {
             var warnings = warnOverwriteRisk ? new List<HtmlAnchorWarning>() : null;
-            var anchored = extractor.AnchorHtml(html, options, doc.Blocks, warnings);
+            var anchored = extractor.AnchorHtml(preserved, options, doc.Blocks, warnings);
+            anchored = ReinjectPreserved(anchored, preservedMap);
             File.WriteAllText(anchorHtmlOut, anchored);
 
             if (warnOverwriteRisk && warnings is not null)
@@ -192,6 +196,7 @@ internal class Program
         string? editPacketOutPath = null;
         string? exportHtmlOutPath = null;
         string? anchoredHtmlOutPath = null;
+        var onlyBlocks = new HashSet<string>(StringComparer.Ordinal);
 
         bool force = false;
         bool warnOverwriteRisk = true;
@@ -226,6 +231,10 @@ internal class Program
 
                 case "--anchor-html-out":
                     anchoredHtmlOutPath = args[++i];
+                    break;
+
+                case "--only-block":
+                    onlyBlocks.Add(args[++i]);
                     break;
 
                 case "--force":
@@ -264,7 +273,8 @@ internal class Program
         if (!File.Exists(patchPath))
             return Fail($"Patch file not found: {patchPath}");
 
-        var html = File.ReadAllText(inputPath);
+        var originalHtml = File.ReadAllText(inputPath);
+        var preserved = PreserveScriptAndStyle(originalHtml, out var preservedMap);
         var patchJson = File.ReadAllText(patchPath);
 
         WirePatchV1 patch;
@@ -272,14 +282,27 @@ internal class Program
         {
             patch = JsonSerializer.Deserialize<WirePatchV1>(patchJson)
                     ?? throw new InvalidOperationException("Invalid patch JSON");
+
+            // Filter ops by block_id if requested (repeatable --only-block).
+            // Important: patch header validation MUST still run as usual; this only scopes execution.
+            var ops = patch.Ops;
+            if (onlyBlocks.Count > 0)
+            {
+                ops = patch.Ops.Where(op => op.BlockId != null && onlyBlocks.Contains(op.BlockId)).ToList();
+                if (ops.Count == 0)
+                    Console.Error.WriteLine("INFO no patch operations match --only-block filter; nothing to do.");
+            }
+
+            patch.Ops = ops;
         }
         catch (Exception ex)
         {
             return Fail($"Failed to parse patch.json: {ex.Message}");
         }
 
+
         var extractor = new HtmlBlockExtractor();
-        var originalDoc = extractor.Extract(html, options);
+        var originalDoc = extractor.Extract(preserved, options);
 
         // In suggest-only mode (default), we do not mutate anything.
         // We still validate patch binding (v/ha/h) and emit useful warnings.
@@ -315,7 +338,8 @@ internal class Program
             if (anchoredHtmlOutPath is not null)
             {
                 var warnings = warnOverwriteRisk ? new List<HtmlAnchorWarning>() : null;
-                var anchored = extractor.AnchorHtml(html, options, originalDoc.Blocks, warnings);
+                var anchored = extractor.AnchorHtml(preserved, options, originalDoc.Blocks, warnings);
+                anchored = ReinjectPreserved(anchored, preservedMap);
                 File.WriteAllText(anchoredHtmlOutPath, anchored);
 
                 if (warnOverwriteRisk && warnings is not null)
@@ -325,7 +349,8 @@ internal class Program
             if (exportHtmlOutPath is not null)
             {
                 // Export without anchors == original HTML; still run through strip to guarantee no anchor attrs.
-                var stripped = extractor.StripAnchors(html);
+                var stripped = extractor.StripAnchors(preserved);
+                stripped = ReinjectPreserved(stripped, preservedMap);
                 File.WriteAllText(exportHtmlOutPath, stripped);
             }
 
@@ -363,41 +388,62 @@ internal class Program
         // Emit HTML outputs (optional)
         if (anchoredHtmlOutPath is not null || exportHtmlOutPath is not null)
         {
-            // If export is requested, write stripped HTML. If anchor is requested, keep anchors.
-            var wantStrip = exportHtmlOutPath is not null;
-            var patchedHtml = HtmlPatchRenderer.ApplyPatchedBlocks(
-                originalHtml: html,
+            // Only touch blocks that are actually affected by the (possibly filtered) patch ops.
+            // HtmlPatchRenderer is currently inline-unaware; rewriting every block would clear child elements
+            // across the entire document even when the patch changes a single block.
+            var affectedIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var op in patch.Ops)
+            {
+                switch (op)
+                {
+                    case WireReplaceOp r when !string.IsNullOrWhiteSpace(r.BlockId):
+                        affectedIds.Add(r.BlockId);
+                        break;
+                    case WireDeleteOp d when !string.IsNullOrWhiteSpace(d.BlockId):
+                        affectedIds.Add(d.BlockId);
+                        break;
+                    case WireInsertAfterOp ins when !string.IsNullOrWhiteSpace(ins.NewBlockId):
+                        affectedIds.Add(ins.NewBlockId);
+                        break;
+                }
+            }
+
+            var touchedBlocks = patchedDoc.Blocks
+                .Where(b => affectedIds.Contains(b.BlockId))
+                .ToList();
+
+            // Render once (anchored). Then export can strip anchors from this.
+            var warnings = (warnOverwriteRisk && anchoredHtmlOutPath is not null)
+                ? new List<HtmlAnchorWarning>()
+                : null;
+
+            var patchedAnchoredHtml = HtmlPatchRenderer.ApplyPatchedBlocks(
+                originalHtml: preserved,
                 options: options,
                 extractor: extractor,
                 originalBlocks: originalDoc.Blocks,
-                patchedBlocks: patchedDoc.Blocks,
-                stripAnchors: wantStrip
+                patchedBlocks: touchedBlocks,
+                stripAnchors: false,
+                warnings: warnings
             );
+
+            patchedAnchoredHtml = ReinjectPreserved(patchedAnchoredHtml, preservedMap);
 
             if (anchoredHtmlOutPath is not null)
             {
-                var anchoredPatched = HtmlPatchRenderer.ApplyPatchedBlocks(
-                    originalHtml: html,
-                    options: options,
-                    extractor: extractor,
-                    originalBlocks: originalDoc.Blocks,
-                    patchedBlocks: patchedDoc.Blocks,
-                    stripAnchors: false
-                );
-
-                // Collect overwrite warnings for anchored output if enabled.
-                if (warnOverwriteRisk)
-                {
-                    var warnings = new List<HtmlAnchorWarning>();
-                    _ = extractor.AnchorHtml(anchoredPatched, options, patchedDoc.Blocks, warnings);
+                if (warnOverwriteRisk && warnings is not null)
                     EmitOverwriteWarnings(warnings);
-                }
 
-                File.WriteAllText(anchoredHtmlOutPath, anchoredPatched);
+                var reinjected = ReinjectPreserved(patchedAnchoredHtml, preservedMap);
+                File.WriteAllText(anchoredHtmlOutPath, reinjected);
             }
 
             if (exportHtmlOutPath is not null)
-                File.WriteAllText(exportHtmlOutPath, patchedHtml);
+            {
+                var stripped = extractor.StripAnchors(patchedAnchoredHtml);
+                stripped = ReinjectPreserved(stripped, preservedMap);
+                File.WriteAllText(exportHtmlOutPath, stripped);
+            }
         }
 
         return 0;
@@ -446,6 +492,37 @@ internal class Program
                     break;
             }
         }
+    }
+
+    static string PreserveScriptAndStyle(string html, out Dictionary<string, string> preserved)
+    {
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        int i = 0;
+
+        var replaced = Regex.Replace(
+            html,
+            @"<\s*(script|style)\b[^>]*>[\s\S]*?<\s*/\s*\1\s*>",
+            m =>
+            {
+                var key = $"<!--BDIR_PRESERVE_{i}-->";
+                map[key] = m.Value;
+                i++;
+                return key;
+            },
+            RegexOptions.IgnoreCase
+        );
+
+        preserved = map;
+        return replaced;
+    }
+
+    static string ReinjectPreserved(string html, Dictionary<string, string> preserved)
+    {
+        foreach (var kv in preserved)
+        {
+            html = html.Replace(kv.Key, kv.Value, StringComparison.Ordinal);
+        }
+        return html;
     }
 
     static void EmitOverwriteWarnings(IEnumerable<HtmlAnchorWarning> warnings)
